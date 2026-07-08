@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted.
+Accepted. The one deliberate cut — `_in` with a variable
+(`Error.VariablesNotSupportedForIn`) — was lifted in milestone 6 after
+[0016](0016-adopt-libpq.md) (libpq) made array-parameter binding practical:
+`_in` with a variable now lowers to `= ANY($N)` with the whole array bound as
+one Postgres array-literal text parameter (`ast.AnyExpr`,
+`executor/pg_array.zig`). Everything else here stands unchanged.
 
 ## Context
 

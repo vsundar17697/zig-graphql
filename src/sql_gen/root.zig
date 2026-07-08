@@ -48,6 +48,29 @@ test "generate produces a full statement end-to-end from IR + schema" {
     try std.testing.expect(std.mem.indexOf(u8, rendered.sql, "\"album\".\"Title\" AS \"Title\"") != null);
 }
 
+test "generate renders _in with a variable as `= ANY($N)` bound to one array param" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var schema_model = schema.SchemaModel{};
+    try schema_model.collections.put(allocator, "album", .{ .db_schema = "public", .db_table = "album", .object_type = "album" });
+
+    var query = ndc_ir.Query{ .collection = "album" };
+    try query.fields.put(allocator, "Title", .{ .column = .{ .column = "Title" } });
+    query.predicate = .{ .binary_op = .{
+        .column = .{ .name = "Title" },
+        .operator = .in,
+        .value = .{ .variable = "titles" },
+    } };
+
+    const rendered = try generate(allocator, &query, &schema_model);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered.sql, "\"album\".\"Title\" = ANY($1)") != null);
+    try std.testing.expectEqual(@as(usize, 1), rendered.params.len);
+    try std.testing.expectEqualStrings("titles", rendered.params[0].array_variable_ref);
+}
+
 
 test {
     std.testing.refAllDecls(@This());

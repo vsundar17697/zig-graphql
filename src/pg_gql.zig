@@ -99,6 +99,7 @@ test "graphql_parser and query_builder produce equivalent queries: identical ren
             .float => try std.testing.expectEqual(gp.float, bp.float),
             .null_ => {},
             .variable_ref => try std.testing.expectEqualStrings(gp.variable_ref, bp.variable_ref),
+            .array_variable_ref => try std.testing.expectEqualStrings(gp.array_variable_ref, bp.array_variable_ref),
         }
     }
 }

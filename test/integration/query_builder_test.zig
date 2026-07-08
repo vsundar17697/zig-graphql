@@ -262,3 +262,119 @@ test "runWithVariables executes the same rendered query once per variable set" {
     const third_rows = parsed.value.array.items[2].object.get("rows").?.array;
     try std.testing.expectEqual(@as(usize, 0), third_rows.items.len);
 }
+
+// `_in` with a variable binds the whole array as one `= ANY($N)` parameter
+// (Postgres array-literal encoding, executor/pg_array.zig) -- the milestone 2
+// deferral lifted by libpq (ADRs 0009/0016). The hostile-string set proves
+// the array-literal escaping end-to-end: elements containing quotes, commas,
+// braces, and backslashes must neither error, nor corrupt the match for the
+// legitimate element travelling in the same array.
+test "runWithVariables binds an _in variable as one array parameter" {
+    const allocator = std.testing.allocator;
+
+    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
+        .host = "127.0.0.1",
+        .port = 55432,
+        .user = "pggql",
+        .database = "pggql",
+    });
+    defer conn.close();
+
+    var schema_arena = std.heap.ArenaAllocator.init(allocator);
+    defer schema_arena.deinit();
+    const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
+
+    var query_arena = std.heap.ArenaAllocator.init(allocator);
+    defer query_arena.deinit();
+    const qa = query_arena.allocator();
+
+    var builder = pg_gql.query_builder.Builder.init(qa, "album");
+    try builder.select("title");
+    builder.where(pg_gql.query_builder.column("title").inVar("titles"));
+    try builder.orderBy(&.{pg_gql.query_builder.column("title").asc()});
+    const query = builder.build();
+    try pg_gql.query_builder.validate(&query, &schema_model);
+
+    // Set 1: two matches among the three seeded albums.
+    var titles_1 = std.json.Array.init(qa);
+    try titles_1.append(.{ .string = "Balls to the Wall" });
+    try titles_1.append(.{ .string = "Let There Be Rock" });
+    var set_1: pg_gql.ndc_ir.VariableSet = .{};
+    try set_1.put(qa, "titles", .{ .array = titles_1 });
+
+    // Set 2: one legitimate match travelling with hostile elements and a
+    // JSON null (SQL `= ANY` never matches NULL, it must simply not error).
+    var titles_2 = std.json.Array.init(qa);
+    try titles_2.append(.{ .string = "Let There Be Rock" });
+    try titles_2.append(.{ .string = "say \"hi\", {brace}" });
+    try titles_2.append(.{ .string = "C:\\path\\" });
+    try titles_2.append(.null);
+    var set_2: pg_gql.ndc_ir.VariableSet = .{};
+    try set_2.put(qa, "titles", .{ .array = titles_2 });
+
+    // Set 3: the empty array matches nothing and must not error.
+    var set_3: pg_gql.ndc_ir.VariableSet = .{};
+    try set_3.put(qa, "titles", .{ .array = std.json.Array.init(qa) });
+
+    var parsed = try pg_gql.executor.runWithVariables(allocator, conn, &query, &schema_model, &.{ set_1, set_2, set_3 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
+
+    const first_rows = parsed.value.array.items[0].object.get("rows").?.array;
+    try std.testing.expectEqual(@as(usize, 2), first_rows.items.len);
+    try std.testing.expectEqualStrings("Balls to the Wall", first_rows.items[0].object.get("title").?.string);
+    try std.testing.expectEqualStrings("Let There Be Rock", first_rows.items[1].object.get("title").?.string);
+
+    const second_rows = parsed.value.array.items[1].object.get("rows").?.array;
+    try std.testing.expectEqual(@as(usize, 1), second_rows.items.len);
+    try std.testing.expectEqualStrings("Let There Be Rock", second_rows.items[0].object.get("title").?.string);
+
+    const third_rows = parsed.value.array.items[2].object.get("rows").?.array;
+    try std.testing.expectEqual(@as(usize, 0), third_rows.items.len);
+}
+
+// Same mechanism against an integer column: Postgres infers the parameter's
+// array type from the compared column (`album_id = ANY($1)` makes $1 an
+// int array), so the text literal `{"2","3"}` must coerce cleanly.
+test "runWithVariables binds an _in variable against an integer column" {
+    const allocator = std.testing.allocator;
+
+    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
+        .host = "127.0.0.1",
+        .port = 55432,
+        .user = "pggql",
+        .database = "pggql",
+    });
+    defer conn.close();
+
+    var schema_arena = std.heap.ArenaAllocator.init(allocator);
+    defer schema_arena.deinit();
+    const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
+
+    var query_arena = std.heap.ArenaAllocator.init(allocator);
+    defer query_arena.deinit();
+    const qa = query_arena.allocator();
+
+    var builder = pg_gql.query_builder.Builder.init(qa, "album");
+    try builder.select("album_id");
+    builder.where(pg_gql.query_builder.column("album_id").inVar("ids"));
+    try builder.orderBy(&.{pg_gql.query_builder.column("album_id").asc()});
+    const query = builder.build();
+    try pg_gql.query_builder.validate(&query, &schema_model);
+
+    var ids = std.json.Array.init(qa);
+    try ids.append(.{ .integer = 2 });
+    try ids.append(.{ .integer = 3 });
+    try ids.append(.{ .integer = 999 });
+    var set: pg_gql.ndc_ir.VariableSet = .{};
+    try set.put(qa, "ids", .{ .array = ids });
+
+    var parsed = try pg_gql.executor.runWithVariables(allocator, conn, &query, &schema_model, &.{set});
+    defer parsed.deinit();
+
+    const rows = parsed.value.array.items[0].object.get("rows").?.array;
+    try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+    try std.testing.expectEqual(@as(i64, 2), rows.items[0].object.get("album_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), rows.items[1].object.get("album_id").?.integer);
+}

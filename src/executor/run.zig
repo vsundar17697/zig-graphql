@@ -3,6 +3,7 @@ const ndc_ir = @import("ndc_ir");
 const schema = @import("schema");
 const sql_gen = @import("sql_gen");
 const pg_wire = @import("pg_wire");
+const pg_array = @import("pg_array.zig");
 
 pub const Error = sql_gen.Error || pg_wire.Error || std.mem.Allocator.Error ||
     std.json.ParseError(std.json.Scanner) || error{ UnexpectedResultShape, UnboundVariable, UnsupportedVariableValue };
@@ -20,26 +21,48 @@ fn toQueryParam(allocator: std.mem.Allocator, value: sql_gen.ast.Value) Error!pg
         .integer => |i| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{i}) },
         .float => |f| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{f}) },
         .text => |t| .{ .text = t },
-        .variable_ref => Error.UnboundVariable,
+        .variable_ref, .array_variable_ref => Error.UnboundVariable,
     };
 }
 
-/// Resolves a `variable_ref` against one VariableSet's JSON value into a
-/// bindable QueryParam; every other Value variant passes through `toQueryParam`
-/// unchanged (a variable set only needs to supply values for the columns that
-/// actually reference variables).
+/// Renders one JSON scalar to the text encoding Postgres expects for a bound
+/// parameter; JSON null maps to Zig null. Shared between scalar variable
+/// resolution and array-element encoding so the two encodings can never
+/// drift apart. Nested arrays/objects are rejected -- NDC variable values
+/// are scalars or flat scalar arrays, nothing deeper.
+fn jsonScalarText(allocator: std.mem.Allocator, value: std.json.Value) Error!?[]const u8 {
+    return switch (value) {
+        .null => null,
+        .bool => |b| if (b) "t" else "f",
+        .integer => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
+        .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
+        .string => |s| s,
+        .number_string, .array, .object => Error.UnsupportedVariableValue,
+    };
+}
+
+/// Resolves a `variable_ref`/`array_variable_ref` against one VariableSet's
+/// JSON value into a bindable QueryParam; every other Value variant passes
+/// through `toQueryParam` unchanged (a variable set only needs to supply
+/// values for the columns that actually reference variables). An array
+/// variable binds as a single Postgres array-literal text parameter (see
+/// pg_array.zig), which `= ANY($N)` consumes server-side.
 fn resolveQueryParam(allocator: std.mem.Allocator, value: sql_gen.ast.Value, variables: *const ndc_ir.VariableSet) Error!pg_wire.QueryParam {
     return switch (value) {
         .variable_ref => |name| blk: {
             const json_value = variables.get(name) orelse return Error.UnboundVariable;
-            break :blk switch (json_value) {
-                .null => .null_,
-                .bool => |b| .{ .text = if (b) "t" else "f" },
-                .integer => |i| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{i}) },
-                .float => |f| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{f}) },
-                .string => |s| .{ .text = s },
-                .number_string, .array, .object => Error.UnsupportedVariableValue,
+            const text = (try jsonScalarText(allocator, json_value)) orelse break :blk .null_;
+            break :blk .{ .text = text };
+        },
+        .array_variable_ref => |name| blk: {
+            const json_value = variables.get(name) orelse return Error.UnboundVariable;
+            const array = switch (json_value) {
+                .array => |a| a,
+                else => return Error.UnsupportedVariableValue,
             };
+            const elements = try allocator.alloc(?[]const u8, array.items.len);
+            for (array.items, 0..) |item, i| elements[i] = try jsonScalarText(allocator, item);
+            break :blk .{ .text = try pg_array.encodeLiteral(allocator, elements) };
         },
         else => try toQueryParam(allocator, value),
     };
@@ -185,4 +208,59 @@ test "resolveQueryParam passes non-variable values straight through to toQueryPa
     var variables = ndc_ir.VariableSet{};
     const param = try resolveQueryParam(allocator, .{ .integer = 7 }, &variables);
     try std.testing.expectEqualStrings("7", param.text);
+}
+
+test "resolveQueryParam encodes an array variable as one Postgres array literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var items = std.json.Array.init(allocator);
+    try items.append(.{ .string = "plain" });
+    try items.append(.{ .string = "with \"quotes\" and \\slash" });
+    try items.append(.{ .integer = 42 });
+    try items.append(.null);
+    try items.append(.{ .bool = true });
+
+    var variables = ndc_ir.VariableSet{};
+    try variables.put(allocator, "values", .{ .array = items });
+
+    const param = try resolveQueryParam(allocator, .{ .array_variable_ref = "values" }, &variables);
+    try std.testing.expectEqualStrings(
+        \\{"plain","with \"quotes\" and \\slash","42",NULL,"t"}
+    , param.text);
+}
+
+test "resolveQueryParam rejects a non-array value bound in array position" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var variables = ndc_ir.VariableSet{};
+    try variables.put(allocator, "values", .{ .integer = 1 });
+
+    const result = resolveQueryParam(allocator, .{ .array_variable_ref = "values" }, &variables);
+    try std.testing.expectError(Error.UnsupportedVariableValue, result);
+}
+
+test "resolveQueryParam rejects nested arrays inside an array variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var inner = std.json.Array.init(allocator);
+    var items = std.json.Array.init(allocator);
+    try items.append(.{ .array = inner });
+    _ = &inner;
+
+    var variables = ndc_ir.VariableSet{};
+    try variables.put(allocator, "values", .{ .array = items });
+
+    const result = resolveQueryParam(allocator, .{ .array_variable_ref = "values" }, &variables);
+    try std.testing.expectError(Error.UnsupportedVariableValue, result);
+}
+
+test "toQueryParam rejects an unresolved array_variable_ref" {
+    const result = toQueryParam(std.testing.allocator, .{ .array_variable_ref = "x" });
+    try std.testing.expectError(Error.UnboundVariable, result);
 }

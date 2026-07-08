@@ -31,8 +31,9 @@ pub const Column = struct {
 
     /// Compares against a named query variable (resolved at execution time via
     /// `executor.runWithVariables`, not at build time) rather than a literal --
-    /// see docs/decisions/0009-query-variables.md. Only `eq`/`neq`/`gt`/`gte`/
-    /// `lt`/`lte` support variables; `_in` with a variable is unsupported.
+    /// see docs/decisions/0009-query-variables.md. `inVar`'s variable must
+    /// resolve to a JSON array of scalars; it binds as one Postgres array
+    /// parameter (`= ANY($N)`, see executor/pg_array.zig).
     pub fn eqVar(self: Column, variable_name: []const u8) ndc_ir.Expression {
         return self.compareVar(.eq, variable_name);
     }
@@ -50,6 +51,9 @@ pub const Column = struct {
     }
     pub fn lteVar(self: Column, variable_name: []const u8) ndc_ir.Expression {
         return self.compareVar(.lte, variable_name);
+    }
+    pub fn inVar(self: Column, variable_name: []const u8) ndc_ir.Expression {
+        return self.compareVar(.in, variable_name);
     }
 
     pub fn isNull(self: Column) ndc_ir.Expression {

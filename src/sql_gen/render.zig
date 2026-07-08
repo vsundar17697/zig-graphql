@@ -85,6 +85,12 @@ fn renderExpr(bufs: *Buffers, allocator: std.mem.Allocator, expr: ast.SqlExpr) E
             }
             try bufs.sql.appendSlice(allocator, ")");
         },
+        .any_ => |any_expr| {
+            try writeColumnRef(&bufs.sql, allocator, any_expr.column);
+            try bufs.sql.appendSlice(allocator, " = ANY(");
+            try writePlaceholder(bufs, allocator, any_expr.param);
+            try bufs.sql.appendSlice(allocator, ")");
+        },
         .is_null => |col| {
             try writeColumnRef(&bufs.sql, allocator, col);
             try bufs.sql.appendSlice(allocator, " IS NULL");

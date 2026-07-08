@@ -16,6 +16,12 @@ pub const Value = union(enum) {
     float: f64,
     text: []const u8,
     variable_ref: []const u8,
+    /// A named query variable bound in *array* position (the right-hand side
+    /// of `= ANY($N)`, see `AnyExpr`). Distinct from `variable_ref` so the
+    /// executor knows to demand a JSON array and encode it as one Postgres
+    /// array-literal parameter rather than a scalar -- see
+    /// executor/pg_array.zig.
+    array_variable_ref: []const u8,
 };
 
 pub const ColumnRef = struct {
@@ -45,12 +51,24 @@ pub const InExpr = struct {
     values: []const Value,
 };
 
+/// Rendered as `col = ANY($N)` with the whole array bound as one parameter --
+/// the variable-driven counterpart of `in_`, for when the element count isn't
+/// known at render time (NDC variable batching re-binds `$N` per variable set
+/// against SQL that was rendered exactly once).
+pub const AnyExpr = struct {
+    column: ColumnRef,
+    /// Always `.array_variable_ref` today; typed as `Value` (not a bare name)
+    /// so a literal-array binding can reuse this node later without reshaping.
+    param: Value,
+};
+
 pub const SqlExpr = union(enum) {
     and_: []const SqlExpr,
     or_: []const SqlExpr,
     not_: *const SqlExpr,
     binary: BinaryExpr,
     in_: InExpr,
+    any_: AnyExpr,
     is_null: ColumnRef,
     /// Rendered as `EXISTS (SELECT 1 FROM ... WHERE ...)`. `items` on the
     /// referenced Select is always empty (an existence check needs no column

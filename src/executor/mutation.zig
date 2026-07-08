@@ -7,10 +7,11 @@ const pg_wire = @import("pg_wire");
 pub const Error = sql_gen.MutationError || pg_wire.Error || std.mem.Allocator.Error ||
     std.json.ParseError(std.json.Scanner) || error{UnexpectedResultShape};
 
-/// Mutation operations never produce a `variable_ref` param -- `mutation_to_sql.zig`'s
-/// argument translation only ever emits concrete scalar values (see
-/// docs/decisions/0010-mutation-procedure-naming.md) -- so unlike `run.zig`'s
-/// `toQueryParam`, that case is truly unreachable here rather than an error.
+/// Mutation operations never produce a `variable_ref`/`array_variable_ref`
+/// param -- `mutation_to_sql.zig`'s argument translation only ever emits
+/// concrete scalar values (see docs/decisions/0010-mutation-procedure-naming.md)
+/// -- so unlike `run.zig`'s `toQueryParam`, those cases are truly unreachable
+/// here rather than errors.
 fn toQueryParam(allocator: std.mem.Allocator, value: sql_gen.ast.Value) Error!pg_wire.QueryParam {
     return switch (value) {
         .null_ => .null_,
@@ -18,7 +19,7 @@ fn toQueryParam(allocator: std.mem.Allocator, value: sql_gen.ast.Value) Error!pg
         .integer => |i| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{i}) },
         .float => |f| .{ .text = try std.fmt.allocPrint(allocator, "{d}", .{f}) },
         .text => |t| .{ .text = t },
-        .variable_ref => unreachable,
+        .variable_ref, .array_variable_ref => unreachable,
     };
 }
 

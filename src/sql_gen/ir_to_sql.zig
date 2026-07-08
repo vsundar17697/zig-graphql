@@ -7,7 +7,6 @@ pub const Error = error{
     UnknownCollection,
     UnknownRelationship,
     UnsupportedComparisonValue,
-    VariablesNotSupportedForIn,
 } || std.mem.Allocator.Error;
 
 fn toSqlValue(value: std.json.Value) Error!ast.Value {
@@ -89,13 +88,17 @@ fn translateExpr(
         .binary_op => |b| {
             const column = ast.ColumnRef{ .table_alias = alias, .column = b.column.name };
             if (b.operator == .in) {
-                // `_in` with a variable would need array-parameter binding
-                // (e.g. `= ANY($1::text[])`), which pg_wire's text-only
-                // parameter encoding doesn't support yet -- deliberately
-                // deferred, see docs/decisions/0009-query-variables.md.
+                // A literal list lowers to `IN ($1, $2, ...)`; a variable's
+                // element count isn't known at render time, so it lowers to
+                // `= ANY($N)` with the whole array bound as one parameter
+                // (the docs/decisions/0009-query-variables.md deferral,
+                // lifted once libpq landed -- see executor/pg_array.zig).
                 const scalar = switch (b.value) {
                     .scalar => |s| s,
-                    .variable => return Error.VariablesNotSupportedForIn,
+                    .variable => |name| return .{ .any_ = .{
+                        .column = column,
+                        .param = .{ .array_variable_ref = name },
+                    } },
                 };
                 const array = switch (scalar) {
                     .array => |a| a,
