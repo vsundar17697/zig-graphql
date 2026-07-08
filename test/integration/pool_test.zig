@@ -101,3 +101,70 @@ test "pool: a connection killed mid-lease is discarded, not returned to the idle
     defer result.deinit();
     try std.testing.expectEqualStrings("1", result.rows[0].columns[0].?);
 }
+
+// Milestone 6 staleness policy: a connection past max_lifetime_ms is
+// recycled on acquire even though it is perfectly healthy -- proven by the
+// backend PID changing across a release/acquire pair.
+test "pool: max-lifetime recycling dials a fresh connection on acquire" {
+    const allocator = std.testing.allocator;
+    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, 1);
+    defer pool.deinit();
+    pool.max_lifetime_ms = -1; // every connection is instantly "too old"
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    const io = threaded.io();
+
+    var lease_1 = try pool.acquire(io);
+    const pid_1 = try backendPid(lease_1.conn);
+    lease_1.release(io);
+
+    var lease_2 = try pool.acquire(io);
+    defer lease_2.release(io);
+    const pid_2 = try backendPid(lease_2.conn);
+
+    try std.testing.expect(pid_1 != pid_2);
+    try std.testing.expect(pool.open_count <= 1);
+}
+
+// Milestone 6 staleness policy: an idle connection whose backend died is
+// caught by the validate-on-acquire ping and replaced transparently -- the
+// caller sees a working connection, never the dead one. (Contrast with the
+// mid-lease kill test above, where the *caller* owns the failure; here the
+// death happens while the pool holds the connection.)
+test "pool: a dead idle connection is caught by validation and replaced on acquire" {
+    const allocator = std.testing.allocator;
+    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, 1);
+    defer pool.deinit();
+    pool.validate_after_idle_ms = -1; // ping on every acquire
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    const io = threaded.io();
+
+    var lease_1 = try pool.acquire(io);
+    const pid_1 = try backendPid(lease_1.conn);
+    lease_1.release(io);
+
+    // Kill the idle connection's backend from an independent connection.
+    const killer = try pg_gql.pg_wire.Connection.connect(allocator, pool_options);
+    defer killer.close();
+    {
+        const sql = try std.fmt.allocPrint(allocator, "SELECT pg_terminate_backend({d})", .{pid_1});
+        defer allocator.free(sql);
+        var result = try killer.query(sql, &.{});
+        defer result.deinit();
+    }
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
+
+    var lease_2 = try pool.acquire(io);
+    defer lease_2.release(io);
+    const pid_2 = try backendPid(lease_2.conn);
+
+    try std.testing.expect(pid_1 != pid_2);
+    try std.testing.expect(pool.open_count <= 1);
+}
+
+fn backendPid(conn: *pg_gql.pg_wire.Connection) !i64 {
+    var result = try conn.query("SELECT pg_backend_pid()", &.{});
+    defer result.deinit();
+    return std.fmt.parseInt(i64, result.rows[0].columns[0].?, 10);
+}

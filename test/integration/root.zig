@@ -14,7 +14,10 @@
 //! - graphql_schema_test.zig: SDL + introspection execution against the live fixture (M4.4/4.5).
 //! - graphql_route_test.zig: the /graphql parse->resolve->lower->execute->envelope
 //!   pipeline against real Postgres (M4.6).
-//! - pool_test.zig: pg_wire.Pool concurrency and broken-connection recovery (M4.7).
+//! - pool_test.zig: pg_wire.Pool concurrency, broken-connection recovery (M4.7), and
+//!   the milestone 6 staleness policy (max-lifetime recycling, validate-on-acquire).
+//! - connection_test.zig: statement timeouts, cross-thread cancellation, and unnamed
+//!   prepared statements (milestone 6).
 
 const std = @import("std");
 
@@ -25,6 +28,7 @@ const mutation_test = @import("mutation_test.zig");
 const graphql_schema_test = @import("graphql_schema_test.zig");
 const graphql_route_test = @import("graphql_route_test.zig");
 const pool_test = @import("pool_test.zig");
+const connection_test = @import("connection_test.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -35,4 +39,5 @@ test {
     _ = graphql_schema_test;
     _ = graphql_route_test;
     _ = pool_test;
+    _ = connection_test;
 }

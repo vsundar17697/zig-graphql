@@ -82,7 +82,10 @@ fn executeAndDecodeOne(
 ) Error!std.json.Value {
     var result = try connection.query(sql, params);
     defer result.deinit();
+    return decodeRowSet(allocator, &result);
+}
 
+fn decodeRowSet(allocator: std.mem.Allocator, result: *pg_wire.QueryResult) Error!std.json.Value {
     if (result.rows.len != 1 or result.rows[0].columns.len != 1) return Error.UnexpectedResultShape;
     const json_text = result.rows[0].columns[0] orelse return Error.UnexpectedResultShape;
 
@@ -123,12 +126,13 @@ pub fn run(
     return .{ .arena = heap_arena, .value = .{ .array = response_array } };
 }
 
-/// Renders `query` to SQL exactly once, then executes that same SQL once per
-/// entry in `variable_sets`, resolving each `variable_ref` against that set's
-/// values -- one connection throughout, no re-parsing or re-rendering per set
-/// (see docs/decisions/0009-query-variables.md on why this N-sequential-
-/// round-trips shape is acceptable for milestone 2 and how it upgrades to
-/// prepared-statement reuse later without changing this function's contract).
+/// Renders `query` to SQL exactly once, prepares it server-side once (the
+/// unnamed prepared statement, parsed a single time), then executes it once
+/// per entry in `variable_sets`, resolving each `variable_ref` against that
+/// set's values -- one connection throughout, no re-parsing (client- or
+/// server-side) or re-rendering per set. This is the prepared-statement
+/// upgrade docs/decisions/0009-query-variables.md anticipated, with the
+/// contract unchanged.
 ///
 /// Returns one NDC RowSet per variable set, in order, as the QueryResponse array.
 pub fn runWithVariables(
@@ -148,12 +152,16 @@ pub fn runWithVariables(
     heap_arena.* = std.heap.ArenaAllocator.init(allocator);
     const ha = heap_arena.allocator();
 
+    const prepared = try connection.prepare(rendered.sql);
+
     var response_array = try std.json.Array.initCapacity(ha, variable_sets.len);
     for (variable_sets) |*variables| {
         const params = try a.alloc(pg_wire.QueryParam, rendered.params.len);
         for (rendered.params, 0..) |value, i| params[i] = try resolveQueryParam(a, value, variables);
 
-        const row_set = try executeAndDecodeOne(ha, connection, rendered.sql, params);
+        var result = try prepared.query(params);
+        defer result.deinit();
+        const row_set = try decodeRowSet(ha, &result);
         try response_array.append(row_set);
     }
 
