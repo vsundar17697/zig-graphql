@@ -1,16 +1,35 @@
+//! Postgres connection over libpq (see docs/decisions/0016-adopt-libpq.md,
+//! which supersedes the native wire-protocol client of ADRs 0001/0002).
+
 const std = @import("std");
-const protocol = @import("protocol.zig");
-const auth = @import("auth.zig");
 
-pub const QueryParam = protocol.QueryParam;
+const c = @cImport(@cInclude("libpq-fe.h"));
 
-pub const Error = protocol.WriteError || protocol.ReadError || auth.Error ||
-    std.Io.net.IpAddress.ConnectError || error{
-        AddressParseError,
-        ServerRejectedAuth,
-        UnexpectedMessage,
-        ServerError,
-    };
+/// Text-format query parameter, matching what sql_gen emits (values are
+/// always rendered to text; see sql_gen's Value union).
+pub const QueryParam = union(enum) {
+    null_,
+    text: []const u8,
+};
+
+pub const FieldDescription = struct {
+    name: []const u8,
+    type_oid: u32,
+};
+
+pub const Error = std.mem.Allocator.Error || error{
+    /// Could not establish a connection (unreachable host, refused, bad
+    /// credentials, ...).
+    ConnectionFailed,
+    /// The connection dropped mid-use; its state is unknown and the pool
+    /// treats it as poison (see pool.zig's markBrokenUnless).
+    ConnectionLost,
+    /// A healthy connection reporting a SQL-level failure. libpq resyncs
+    /// the connection automatically after an error, so it stays safe to
+    /// reuse -- the invariant pool.zig's markBrokenUnless and ADR 0011's
+    /// ROLLBACK-after-failure path rely on.
+    ServerError,
+};
 
 pub const Row = struct {
     /// Text-format column values, borrowed from the QueryResult's own arena.
@@ -20,7 +39,7 @@ pub const Row = struct {
 
 pub const QueryResult = struct {
     arena: std.heap.ArenaAllocator,
-    fields: []protocol.FieldDescription,
+    fields: []FieldDescription,
     rows: []Row,
 
     pub fn deinit(self: *QueryResult) void {
@@ -28,22 +47,13 @@ pub const QueryResult = struct {
     }
 };
 
-const read_buffer_size = 64 * 1024;
-const write_buffer_size = 16 * 1024;
-
-/// A single Postgres connection using the native wire protocol (see
-/// docs/decisions/0001-native-postgres-wire-protocol.md). Must be heap
-/// allocated via `connect` and only ever accessed through a pointer -- its
-/// reader/writer capture a pointer back into `self.threaded`, so moving a
-/// Connection by value after connecting would leave that pointer dangling.
+/// A single Postgres connection. Heap-allocated via `connect` so the handle's
+/// address is stable for the pool's pointer-based idle list (pool.zig). Not
+/// safe for concurrent use; one connection serves one request at a time,
+/// which the pool enforces by construction.
 pub const Connection = struct {
     allocator: std.mem.Allocator,
-    threaded: std.Io.Threaded,
-    stream: std.Io.net.Stream,
-    read_buf: [read_buffer_size]u8 = undefined,
-    write_buf: [write_buffer_size]u8 = undefined,
-    reader: std.Io.net.Stream.Reader = undefined,
-    writer: std.Io.net.Stream.Writer = undefined,
+    pg: *c.PGconn,
 
     pub const Options = struct {
         host: []const u8,
@@ -54,133 +64,95 @@ pub const Connection = struct {
     };
 
     pub fn connect(allocator: std.mem.Allocator, options: Options) Error!*Connection {
-        const self = try allocator.create(Connection);
-        errdefer allocator.destroy(self);
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
 
-        self.* = .{
-            .allocator = allocator,
-            .threaded = .init(allocator, .{}),
-            .stream = undefined,
+        const keywords = [_][*c]const u8{ "host", "port", "user", "password", "dbname", null };
+        const values = [_][*c]const u8{
+            (try a.dupeZ(u8, options.host)).ptr,
+            (try std.fmt.allocPrintSentinel(a, "{d}", .{options.port}, 0)).ptr,
+            (try a.dupeZ(u8, options.user)).ptr,
+            (try a.dupeZ(u8, options.password)).ptr,
+            (try a.dupeZ(u8, options.database)).ptr,
+            null,
         };
-        const io = self.threaded.io();
 
-        const addr = std.Io.net.IpAddress.parse(options.host, options.port) catch return Error.AddressParseError;
-        self.stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
-        errdefer self.stream.close(io);
+        // Null return means libpq itself couldn't allocate; every other
+        // failure (auth, unreachable, ...) comes back as a PGconn in
+        // CONNECTION_BAD state.
+        const maybe_pg: ?*c.PGconn = c.PQconnectdbParams(&keywords, &values, 0);
+        const pg = maybe_pg orelse return Error.OutOfMemory;
+        errdefer c.PQfinish(pg);
 
-        self.writer = self.stream.writer(io, &self.write_buf);
-        self.reader = self.stream.reader(io, &self.read_buf);
+        // Log at warn, not err, throughout this file: every failure here is
+        // also reported to the caller as a Zig error, and the caller (not
+        // this library) owns deciding how severe it is -- a client's failed
+        // INSERT is the client's error, not the process's. Error-level logs
+        // also fail `zig build test-integration` outright (the test runner
+        // counts them), and several integration tests trigger these paths
+        // deliberately.
+        if (c.PQstatus(pg) != c.CONNECTION_OK) {
+            std.log.warn("postgres connection failed: {s}", .{trimmed(c.PQerrorMessage(pg))});
+            return Error.ConnectionFailed;
+        }
 
-        try protocol.writeStartupMessage(allocator, &self.writer.interface, options.user, options.database);
-        try self.writer.interface.flush();
-
-        try self.performAuth(options.user, options.password);
-        try self.drainUntilReadyForQuery();
-
+        const self = try allocator.create(Connection);
+        self.* = .{ .allocator = allocator, .pg = pg };
         return self;
     }
 
     pub fn close(self: *Connection) void {
-        self.stream.close(self.threaded.io());
+        c.PQfinish(self.pg);
         self.allocator.destroy(self);
     }
 
-    fn performAuth(self: *Connection, user: []const u8, password: []const u8) Error!void {
-        var msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-        defer msg.deinit(self.allocator);
-
-        if (msg.type == 'E') return errorFromResponse(try protocol.parseErrorResponse(msg.payload));
-        if (msg.type != 'R') return Error.UnexpectedMessage;
-
-        switch (try protocol.parseAuthMessage(msg.payload)) {
-            .ok => return, // trust/no-password auth (e.g. the Docker test fixture)
-            .sasl => try self.performScramAuth(user, password),
-            .sasl_continue, .sasl_final => return Error.UnexpectedMessage,
-        }
-    }
-
-    fn performScramAuth(self: *Connection, user: []const u8, password: []const u8) Error!void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        // Fixed nonce would be a replay vulnerability in production; a real
-        // per-connection random nonce is required here (unlike the auth.zig
-        // golden-trace tests, which pin a fixed nonce deliberately).
-        var nonce_bytes: [18]u8 = undefined;
-        self.threaded.io().random(&nonce_bytes);
-        const encoder = std.base64.standard.Encoder;
-        const nonce = try a.alloc(u8, encoder.calcSize(nonce_bytes.len));
-        _ = encoder.encode(nonce, &nonce_bytes);
-
-        const first = try auth.buildClientFirstMessage(a, user, nonce);
-        try protocol.writeSASLInitialResponse(self.allocator, &self.writer.interface, "SCRAM-SHA-256", first.message);
-        try self.writer.interface.flush();
-
-        var continue_msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-        defer continue_msg.deinit(self.allocator);
-        if (continue_msg.type == 'E') return errorFromResponse(try protocol.parseErrorResponse(continue_msg.payload));
-        if (continue_msg.type != 'R') return Error.UnexpectedMessage;
-        const server_first_message = switch (try protocol.parseAuthMessage(continue_msg.payload)) {
-            .sasl_continue => |m| m,
-            else => return Error.UnexpectedMessage,
-        };
-
-        const server_first = try auth.parseServerFirstMessage(a, server_first_message);
-        const final = try auth.buildClientFinalMessage(a, password, first.bare, server_first_message, server_first);
-
-        try protocol.writeSASLResponse(&self.writer.interface, final.message);
-        try self.writer.interface.flush();
-
-        var final_msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-        defer final_msg.deinit(self.allocator);
-        if (final_msg.type == 'E') return errorFromResponse(try protocol.parseErrorResponse(final_msg.payload));
-        if (final_msg.type != 'R') return Error.UnexpectedMessage;
-        const server_final_message = switch (try protocol.parseAuthMessage(final_msg.payload)) {
-            .sasl_final => |m| m,
-            else => return Error.UnexpectedMessage,
-        };
-        try auth.verifyServerFinalMessage(server_final_message, final.expected_server_signature);
-
-        var ok_msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-        defer ok_msg.deinit(self.allocator);
-        if (ok_msg.type == 'E') return errorFromResponse(try protocol.parseErrorResponse(ok_msg.payload));
-        if (ok_msg.type != 'R') return Error.UnexpectedMessage;
-        switch (try protocol.parseAuthMessage(ok_msg.payload)) {
-            .ok => {},
-            else => return Error.ServerRejectedAuth,
-        }
-    }
-
-    /// Drains ParameterStatus/BackendKeyData messages sent right after
-    /// authentication succeeds, stopping at ReadyForQuery.
-    fn drainUntilReadyForQuery(self: *Connection) Error!void {
-        while (true) {
-            var msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-            defer msg.deinit(self.allocator);
-            switch (msg.type) {
-                'Z' => return,
-                'E' => return errorFromResponse(try protocol.parseErrorResponse(msg.payload)),
-                'S', 'K' => continue,
-                else => return Error.UnexpectedMessage,
-            }
-        }
-    }
-
-    /// Runs one parameterized query via the extended query protocol (Parse/
-    /// Bind/Describe/Execute/Sync -- see docs/decisions/0001). Text-format
-    /// params and results only; sql_gen always emits values as text (see
-    /// sql_gen's Value union), so no binary codec is needed for milestone 1.
+    /// Runs one parameterized query. Text-format params and results only;
+    /// sql_gen always emits values as text (see sql_gen's Value union).
     ///
     /// The returned QueryResult owns an arena sized to this one query; the
     /// caller frees it with `QueryResult.deinit`.
     pub fn query(self: *Connection, sql: []const u8, params: []const QueryParam) Error!QueryResult {
-        try protocol.writeParse(self.allocator, &self.writer.interface, sql);
-        try protocol.writeBind(self.allocator, &self.writer.interface, params);
-        try protocol.writeDescribePortal(self.allocator, &self.writer.interface);
-        try protocol.writeExecute(self.allocator, &self.writer.interface);
-        try protocol.writeSync(&self.writer.interface);
-        try self.writer.interface.flush();
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+
+        // libpq wants C strings: the SQL and each text param need a NUL,
+        // which []const u8 slices don't carry.
+        const sql_z = try sa.dupeZ(u8, sql);
+        const values = try sa.alloc([*c]const u8, params.len);
+        for (params, 0..) |param, i| {
+            values[i] = switch (param) {
+                .null_ => null,
+                .text => |text| (try sa.dupeZ(u8, text)).ptr,
+            };
+        }
+
+        const maybe_res: ?*c.PGresult = c.PQexecParams(
+            self.pg,
+            sql_z.ptr,
+            @intCast(params.len),
+            null, // param types: let the server infer, as the native client did
+            if (params.len == 0) null else values.ptr,
+            null, // param lengths: ignored for text-format params
+            null, // param formats: all text
+            0, // result format: text
+        );
+        const res = maybe_res orelse return self.transportFailure();
+        defer c.PQclear(res);
+
+        const status = c.PQresultStatus(res);
+        if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
+            // A dropped connection also surfaces as a failed result; only a
+            // failure on a still-healthy connection is a SQL-level error.
+            if (c.PQstatus(self.pg) != c.CONNECTION_OK) return self.transportFailure();
+            const sqlstate = c.PQresultErrorField(res, c.PG_DIAG_SQLSTATE);
+            std.log.warn("postgres error [{s}]: {s}", .{
+                if (sqlstate != null) std.mem.span(@as([*:0]const u8, @ptrCast(sqlstate))) else "-----",
+                trimmed(c.PQresultErrorMessage(res)),
+            });
+            return Error.ServerError;
+        }
 
         var result = QueryResult{
             .arena = std.heap.ArenaAllocator.init(self.allocator),
@@ -190,49 +162,40 @@ pub const Connection = struct {
         errdefer result.arena.deinit();
         const a = result.arena.allocator();
 
-        var rows: std.ArrayListUnmanaged(Row) = .empty;
-
-        while (true) {
-            var msg = try protocol.readMessage(self.allocator, &self.reader.interface);
-            defer msg.deinit(self.allocator);
-
-            switch (msg.type) {
-                '1', '2' => {}, // ParseComplete, BindComplete
-                'T' => result.fields = try protocol.parseRowDescription(a, msg.payload),
-                'n' => {}, // NoData (query returns no rows, e.g. a DDL/DML statement)
-                'D' => {
-                    const raw_row = try protocol.parseDataRow(a, msg.payload);
-                    const columns = try a.alloc(?[]const u8, raw_row.columns.len);
-                    for (raw_row.columns, 0..) |col, i| {
-                        columns[i] = if (col) |bytes| try a.dupe(u8, bytes) else null;
-                    }
-                    try rows.append(a, .{ .columns = columns });
-                },
-                'C' => {}, // CommandComplete: nothing to extract for milestone 1's read-only queries
-                'E' => {
-                    const err = errorFromResponse(try protocol.parseErrorResponse(msg.payload));
-                    // Postgres still sends ReadyForQuery after an error, since
-                    // Sync was already part of this round trip -- drain to it
-                    // before returning so the connection is protocol-synced
-                    // for whatever the caller does next (e.g. ROLLBACK). See
-                    // docs/decisions/0011-mutation-transactions.md.
-                    self.drainUntilReadyForQuery() catch {};
-                    return err;
-                },
-                'Z' => break,
-                else => return Error.UnexpectedMessage,
-            }
+        // PGRES_COMMAND_OK (DDL/DML with no RETURNING) reports zero fields
+        // and zero tuples, which falls out of these loops naturally.
+        const field_count: usize = @intCast(c.PQnfields(res));
+        const fields = try a.alloc(FieldDescription, field_count);
+        for (fields, 0..) |*field, i| {
+            field.* = .{
+                .name = try a.dupe(u8, std.mem.span(c.PQfname(res, @intCast(i)))),
+                .type_oid = @intCast(c.PQftype(res, @intCast(i))),
+            };
         }
+        result.fields = fields;
 
-        result.rows = try rows.toOwnedSlice(a);
+        const row_count: usize = @intCast(c.PQntuples(res));
+        const rows = try a.alloc(Row, row_count);
+        for (rows, 0..) |*row, r| {
+            const columns = try a.alloc(?[]const u8, field_count);
+            for (columns, 0..) |*column, col| {
+                if (c.PQgetisnull(res, @intCast(r), @intCast(col)) == 1) {
+                    column.* = null;
+                } else {
+                    const len: usize = @intCast(c.PQgetlength(res, @intCast(r), @intCast(col)));
+                    column.* = try a.dupe(u8, c.PQgetvalue(res, @intCast(r), @intCast(col))[0..len]);
+                }
+            }
+            row.* = .{ .columns = columns };
+        }
+        result.rows = rows;
+
         return result;
     }
 
     /// Begins a transaction. Multi-operation NDC mutation requests run inside
     /// one all-or-nothing transaction -- see
-    /// docs/decisions/0011-mutation-transactions.md. Implemented as plain SQL
-    /// text over the existing extended-protocol `query` method; no new
-    /// wire-protocol work needed.
+    /// docs/decisions/0011-mutation-transactions.md.
     pub fn begin(self: *Connection) Error!void {
         var result = try self.query("BEGIN", &.{});
         result.deinit();
@@ -250,9 +213,16 @@ pub const Connection = struct {
         var result = try self.query("ROLLBACK", &.{});
         result.deinit();
     }
+
+    fn transportFailure(self: *Connection) Error {
+        std.log.warn("postgres connection lost: {s}", .{trimmed(c.PQerrorMessage(self.pg))});
+        return Error.ConnectionLost;
+    }
 };
 
-fn errorFromResponse(fields: protocol.ErrorFields) Error {
-    std.log.err("postgres error [{s}]: {s}", .{ fields.code, fields.message });
-    return Error.ServerError;
+/// libpq error messages arrive NUL-terminated with a trailing newline.
+fn trimmed(message: [*c]const u8) []const u8 {
+    if (message == null) return "(no message)";
+    const span = std.mem.span(@as([*:0]const u8, @ptrCast(message)));
+    return std.mem.trimEnd(u8, span, "\n");
 }

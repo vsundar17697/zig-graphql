@@ -93,9 +93,7 @@ pub fn main() !void {
         // Each thread gets its own `std.Io.Threaded` instance rather than
         // sharing the accept loop's, since `std.Io.Threaded` coordinates its
         // own internal worker pool and nothing documents it as safe to drive
-        // concurrently from arbitrary external OS threads -- `pg_wire.Connection`
-        // already establishes the same "one Threaded instance per logical
-        // unit of work" precedent for exactly this reason.
+        // concurrently from arbitrary external OS threads.
         const thread = std.Thread.spawn(.{}, handleConnectionThread, .{ allocator, client_stream, &ctx }) catch |err| {
             std.log.err("failed to spawn connection thread: {t}", .{err});
             client_stream.close(io);

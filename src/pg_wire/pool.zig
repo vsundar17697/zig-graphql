@@ -3,12 +3,10 @@ const connection_mod = @import("connection.zig");
 
 const Connection = connection_mod.Connection;
 
-/// A fixed-size pool of `*Connection`, storing pointers only -- a
-/// `Connection` captures self-referential pointers into itself once
-/// connected (its reader/writer point at `&self.threaded`, see
-/// `connection.zig`), so it can never be moved after `connect()` returns.
-/// Storing `*Connection` in the pool's idle list isn't a style choice, it's
-/// the only option. See docs/decisions/0015-connection-pool.md.
+/// A fixed-size pool of `*Connection`, matching `Connection.connect`'s
+/// heap-allocated handle API -- a stable address keeps outstanding leases
+/// valid no matter how the idle list reallocates. See
+/// docs/decisions/0015-connection-pool.md.
 ///
 /// Locking uses `std.Io.Mutex`/`std.Io.Condition` (Zig 0.16's cooperative-I/O
 /// synchronization primitives, not `std.Thread`'s -- that no longer exists)

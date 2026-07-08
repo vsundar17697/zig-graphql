@@ -7,7 +7,7 @@ as a library (pure Zig + C ABI) and as a standalone HTTP server.
 Current status: milestone 1 complete -- single-collection queries plus one object
 relationship, through three interchangeable producers (GraphQL text, a typed query
 builder, and literal NDC QueryRequest JSON over HTTP), executing against real Postgres
-via a native wire-protocol client with SCRAM-SHA-256 auth. See [docs/roadmap.md](docs/roadmap.md)
+via libpq (see [ADR 0016](docs/decisions/0016-adopt-libpq.md)). See [docs/roadmap.md](docs/roadmap.md)
 for exact scope and what's deferred, and [docs/architecture.md](docs/architecture.md) for
 the module design. Non-obvious decisions are recorded as ADRs under [docs/decisions/](docs/decisions/).
 
@@ -28,6 +28,9 @@ curl -X POST http://127.0.0.1:8080/query -H 'Content-Type: application/json' -d 
 ## Requirements
 
 - Zig 0.16.0+
+- libpq (`brew install libpq` on macOS, `libpq-dev` on Debian/Ubuntu). Homebrew's keg-only
+  install is found automatically; elsewhere, point the build at it with
+  `zig build -Dlibpq-prefix=/path/to/libpq`.
 - Docker (for Postgres-backed integration tests only — not needed for `zig build test`)
 
 ## Building and testing

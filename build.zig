@@ -4,6 +4,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // libpq location (docs/decisions/0016-adopt-libpq.md). Keg-only Homebrew
+    // installs are off the default search path, so well-known prefixes are
+    // probed when -Dlibpq-prefix isn't given; null falls through to the
+    // system default paths (e.g. libpq-dev on Debian/Ubuntu).
+    const libpq_prefix: ?[]const u8 = b.option(
+        []const u8,
+        "libpq-prefix",
+        "libpq install prefix containing include/ and lib/",
+    ) orelse for ([_][]const u8{
+        "/opt/homebrew/opt/libpq",
+        "/usr/local/opt/libpq",
+    }) |prefix| {
+        std.Io.Dir.accessAbsolute(b.graph.io, prefix, .{}) catch continue;
+        break prefix;
+    } else null;
+
     // --- Leaf / core modules, wired per docs/architecture.md's dependency graph ---
 
     const ndc_ir = b.addModule("ndc_ir", .{
@@ -35,7 +51,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/pg_wire/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    if (libpq_prefix) |prefix| {
+        pg_wire.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        pg_wire.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+    }
+    pg_wire.linkSystemLibrary("pq", .{});
 
     const graphql_parser = b.addModule("graphql_parser", .{
         .root_source_file = b.path("src/graphql_parser/root.zig"),
