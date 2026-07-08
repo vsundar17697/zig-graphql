@@ -1,5 +1,7 @@
 # pg-gql
 
+[![CI](https://github.com/vsundar17697/zig-graphql/actions/workflows/ci.yml/badge.svg)](https://github.com/vsundar17697/zig-graphql/actions/workflows/ci.yml)
+
 A Postgres-backed GraphQL engine written in Zig, structured Hasura-NDC-style: a
 GraphQL-to-IR translation layer and an NDC-postgres-compatible connector core, both usable
 as a library (pure Zig + C ABI) and as a standalone HTTP server.

@@ -98,13 +98,40 @@ together, and a live 3-variable-set batching test.
 | Permanent relationship naming scheme | Deliberately deferred to milestone 4 (hard gate, before SDL generation ships) — see ADR 0006. |
 | GraphQL-document-level `$variable` syntax | A different, request-level concept from NDC's variable-set batching implemented here; planned for milestone 4 alongside `operationName`. |
 
-## Later milestones (not yet planned in detail)
+## Milestone 3 (complete)
 
-- Mutations, subscriptions.
-- Schema-descriptor codegen for the query-builder (replacing the M1 runtime-validation
-  approach — see [ADR 0004](decisions/0004-schema-reconciliation-runtime-validation.md)).
-- Broader introspection (multiple schemas, more relkinds, composite/array/domain types),
-  moving introspection from `information_schema` to `pg_catalog` for performance.
-- Connection pooling, prepared-statement caching.
-- GraphQL client compatibility: SDL/introspection, `__typename`, request-level
-  `variables`/`operationName`, error envelope, `@skip`/`@include`.
+Goal: the write path. NDC procedures auto-derived from the schema — `insert_<table>`
+(single object), `update_<table>_by_pk` (`_set` only), `delete_<table>_by_pk` — with names,
+argument shapes, and the insertability policy fixed permanently by
+[ADR 0010](decisions/0010-mutation-procedure-naming.md). Every multi-operation
+MutationRequest executes inside one all-or-nothing transaction
+([ADR 0011](decisions/0011-mutation-transactions.md)), exposed over `POST /mutation` and
+GraphQL mutation documents, with a `MutationBuilder` for the query-builder producer — the
+flagship two-producer equivalence proof extends to the write path. A connection pool landed
+alongside ([ADR 0015](decisions/0015-connection-pool.md)).
+
+## Milestone 4 (complete)
+
+Goal: a real GraphQL type system. Permanent relationship naming
+([ADR 0012](decisions/0012-permanent-relationship-naming.md), closing ADR 0006's hard gate),
+then the type system as a cached derived artifact with SDL generation and the
+argument-dependent aggregate surface redesign
+([ADR 0013](decisions/0013-graphql-type-system.md)).
+
+## Milestone 4.5 (complete)
+
+Goal: real GraphQL clients can connect. `POST /graphql` accepting the standard
+`{query, operationName, variables}` body and answering with the standard `{data, errors}`
+envelope — document variables, fragments, `@skip`/`@include`, `__typename`, and executable
+`__schema`/`__type` introspection — as a post-processing envelope over the unchanged NDC
+pipeline ([ADR 0014](decisions/0014-graphql-post-endpoint.md)).
+
+## Milestones 5+ — the road to v1.0
+
+Everything from here on is planned in detail in [roadmap-v1.md](roadmap-v1.md) (milestones
+5–14: repo/CI/fuzzing, libpq adoption and connection lifecycle, type/operator breadth,
+mutation breadth, metadata, authorization, production hardening, subscriptions, console,
+release). Status so far: the repo is on GitHub with CI green on macOS and Linux
+(milestone 5, fuzzing still pending); milestone 6 has libpq
+([ADR 0016](decisions/0016-adopt-libpq.md)) and array parameter binding (`_in` with
+variables, lifting ADR 0009's deferral) done, with connection-lifecycle work remaining.
