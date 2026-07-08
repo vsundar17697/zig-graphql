@@ -4,21 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // libpq location (docs/decisions/0016-adopt-libpq.md). Keg-only Homebrew
-    // installs are off the default search path, so well-known prefixes are
-    // probed when -Dlibpq-prefix isn't given; null falls through to the
-    // system default paths (e.g. libpq-dev on Debian/Ubuntu).
-    const libpq_prefix: ?[]const u8 = b.option(
-        []const u8,
-        "libpq-prefix",
-        "libpq install prefix containing include/ and lib/",
-    ) orelse for ([_][]const u8{
-        "/opt/homebrew/opt/libpq",
-        "/usr/local/opt/libpq",
-    }) |prefix| {
-        std.Io.Dir.accessAbsolute(b.graph.io, prefix, .{}) catch continue;
-        break prefix;
-    } else null;
+    const libpq = detectLibpq(b);
 
     // --- Leaf / core modules, wired per docs/architecture.md's dependency graph ---
 
@@ -53,9 +39,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    if (libpq_prefix) |prefix| {
-        pg_wire.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
-        pg_wire.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+    if (libpq) |paths| {
+        pg_wire.addIncludePath(.{ .cwd_relative = paths.include });
+        pg_wire.addLibraryPath(.{ .cwd_relative = paths.lib });
     }
     pg_wire.linkSystemLibrary("pq", .{});
 
@@ -191,4 +177,40 @@ pub fn build(b: *std.Build) void {
     );
     const integration_test = b.addTest(.{ .root_module = integration_mod });
     integration_test_step.dependOn(&b.addRunArtifact(integration_test).step);
+}
+
+const LibpqPaths = struct {
+    include: []const u8,
+    lib: []const u8,
+};
+
+/// Locates libpq's headers and library (docs/decisions/0016-adopt-libpq.md),
+/// in order: an explicit -Dlibpq-prefix, the well-known keg-only Homebrew
+/// prefixes (never on the default search path), then `pg_config` (the
+/// Debian/Ubuntu libpq-dev layout puts libpq-fe.h at /usr/include/postgresql,
+/// also not on the compiler's default include path). Null means "trust the
+/// system default search paths".
+fn detectLibpq(b: *std.Build) ?LibpqPaths {
+    if (b.option([]const u8, "libpq-prefix", "libpq install prefix containing include/ and lib/")) |prefix| {
+        return .{
+            .include = b.pathJoin(&.{ prefix, "include" }),
+            .lib = b.pathJoin(&.{ prefix, "lib" }),
+        };
+    }
+
+    for ([_][]const u8{ "/opt/homebrew/opt/libpq", "/usr/local/opt/libpq" }) |prefix| {
+        std.Io.Dir.accessAbsolute(b.graph.io, prefix, .{}) catch continue;
+        return .{
+            .include = b.pathJoin(&.{ prefix, "include" }),
+            .lib = b.pathJoin(&.{ prefix, "lib" }),
+        };
+    }
+
+    var code: u8 = undefined;
+    const include_dir = b.runAllowFail(&.{ "pg_config", "--includedir" }, &code, .ignore) catch return null;
+    const lib_dir = b.runAllowFail(&.{ "pg_config", "--libdir" }, &code, .ignore) catch return null;
+    return .{
+        .include = std.mem.trimEnd(u8, include_dir, "\n"),
+        .lib = std.mem.trimEnd(u8, lib_dir, "\n"),
+    };
 }

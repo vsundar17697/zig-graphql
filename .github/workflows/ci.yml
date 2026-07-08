@@ -1,0 +1,76 @@
+# CI (roadmap-v1.md milestone 5): unit tests on both platforms, plus the
+# Postgres-backed integration suite against a service container that mirrors
+# docker-compose.yml's fixture (same credentials, trust auth, port, seed).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: build + unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install libpq (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      - name: Install libpq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libpq
+
+      - name: Build
+        run: zig build
+
+      - name: Unit tests
+        run: zig build test
+
+  integration:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pggql
+          POSTGRES_PASSWORD: pggql
+          POSTGRES_DB: pggql
+          # Mirrors docker-compose.yml: the integration tests connect without
+          # a password (trust is fine for a CI-local throwaway container).
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U pggql -d pggql"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install libpq and psql
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev postgresql-client
+
+      # docker-compose.yml seeds via an initdb volume mount; service
+      # containers can't mount checkout files, so seed explicitly instead.
+      - name: Seed fixture schema
+        run: psql "postgres://pggql@localhost:55432/pggql" -f test/fixtures/seed.sql
+
+      - name: Integration tests
+        run: zig build test-integration
