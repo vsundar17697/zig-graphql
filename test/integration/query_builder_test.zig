@@ -1,5 +1,6 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
 fn buildEquivalentQuery(allocator: std.mem.Allocator, schema_model: *const pg_gql.schema.SchemaModel) !pg_gql.ndc_ir.Query {
     // Deliberately the same query as graphql_query_test.zig's GraphQL text:
@@ -26,12 +27,7 @@ fn buildEquivalentQuery(allocator: std.mem.Allocator, schema_model: *const pg_gq
 test "query-builder query with where/order_by/relationship returns the correct nested RowSet JSON" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -67,12 +63,7 @@ test "query-builder query with where/order_by/relationship returns the correct n
 test "GraphQL-path and query-builder-path produce byte-identical JSON when executed against real Postgres" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -109,12 +100,7 @@ test "GraphQL-path and query-builder-path produce byte-identical JSON when execu
 test "GraphQL-path and query-builder-path produce byte-identical JSON for an exists+aggregate query" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -160,12 +146,7 @@ test "GraphQL-path and query-builder-path produce byte-identical JSON for an exi
 test "GraphQL-path's nested max{} syntax and query-builder-path produce byte-identical JSON" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -215,12 +196,7 @@ test "GraphQL-path's nested max{} syntax and query-builder-path produce byte-ide
 test "runWithVariables executes the same rendered query once per variable set" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -272,12 +248,7 @@ test "runWithVariables executes the same rendered query once per variable set" {
 test "runWithVariables binds an _in variable as one array parameter" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -340,12 +311,7 @@ test "runWithVariables binds an _in variable as one array parameter" {
 test "runWithVariables binds an _in variable against an integer column" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);

@@ -1,24 +1,10 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
-
-fn connectToFixture(allocator: std.mem.Allocator) !*pg_gql.pg_wire.Connection {
-    return pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    }) catch |err| {
-        std.debug.print(
-            "\nfailed to connect to the test fixture Postgres at 127.0.0.1:55432 -- is `docker compose up -d --wait` running? ({t})\n",
-            .{err},
-        );
-        return err;
-    };
-}
+const fixture = @import("fixture.zig");
 
 test "introspection discovers the seeded schema and both directions of the album <-> artist relationship" {
     const allocator = std.testing.allocator;
-    const conn = try connectToFixture(allocator);
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -59,7 +45,7 @@ test "introspection discovers the seeded schema and both directions of the album
 // threaded through by schema.buildSchemaModel).
 test "live introspection populates has_default for a serial primary key and false for a plain NOT NULL column" {
     const allocator = std.testing.allocator;
-    const conn = try connectToFixture(allocator);
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var arena = std.heap.ArenaAllocator.init(allocator);

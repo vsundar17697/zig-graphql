@@ -91,6 +91,36 @@ pub const Connection = struct {
         /// with SQLSTATE 57014 -> `error.ServerError`, and the connection
         /// stays reusable. Null means no cap.
         statement_timeout_ms: ?u32 = null,
+        /// TLS negotiation policy (libpq `sslmode`). `.prefer` is libpq's
+        /// own default: TLS if the server offers it, plaintext otherwise.
+        /// Against a network-reachable Postgres use `.verify_full` plus
+        /// `ssl_root_cert` -- anything weaker accepts a MITM's certificate.
+        ssl_mode: SslMode = .prefer,
+        /// CA certificate path for verifying the server (libpq
+        /// `sslrootcert`). `.verify_ca`/`.verify_full` need it unless
+        /// ~/.postgresql/root.crt exists.
+        ssl_root_cert: ?[]const u8 = null,
+
+        pub const SslMode = enum {
+            disable,
+            allow,
+            prefer,
+            require,
+            verify_ca,
+            verify_full,
+
+            /// libpq spells these with hyphens; Zig identifiers can't.
+            fn keyword(mode: SslMode) [:0]const u8 {
+                return switch (mode) {
+                    .disable => "disable",
+                    .allow => "allow",
+                    .prefer => "prefer",
+                    .require => "require",
+                    .verify_ca => "verify-ca",
+                    .verify_full => "verify-full",
+                };
+            }
+        };
     };
 
     pub fn connect(allocator: std.mem.Allocator, options: Options) Error!*Connection {
@@ -116,6 +146,12 @@ pub const Connection = struct {
         if (options.statement_timeout_ms) |ms| {
             try keywords.append(a, "options");
             try values.append(a, (try std.fmt.allocPrintSentinel(a, "-c statement_timeout={d}", .{ms}, 0)).ptr);
+        }
+        try keywords.append(a, "sslmode");
+        try values.append(a, options.ssl_mode.keyword().ptr);
+        if (options.ssl_root_cert) |path| {
+            try keywords.append(a, "sslrootcert");
+            try values.append(a, (try a.dupeZ(u8, path)).ptr);
         }
         try keywords.append(a, null);
         try values.append(a, null);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
 // M4.6 checkpoint: the same parse -> resolve -> lower -> executor.run ->
 // envelope pipeline `http_server/graphql_route.zig` runs per request,
@@ -8,12 +9,7 @@ const pg_gql = @import("pg_gql");
 // not worth re-deriving a fake HTTP request for).
 
 fn connect(allocator: std.mem.Allocator) !*pg_gql.pg_wire.Connection {
-    return pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    return fixture.connect(allocator);
 }
 
 test "/graphql pipeline: __typename, object relationship reshaping, and multiple root fields" {

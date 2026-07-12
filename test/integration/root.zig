@@ -18,6 +18,8 @@
 //!   the milestone 6 staleness policy (max-lifetime recycling, validate-on-acquire).
 //! - connection_test.zig: statement timeouts, cross-thread cancellation, and unnamed
 //!   prepared statements (milestone 6).
+//! - tls_test.zig: negotiated-TLS assertions driven by the environment; the
+//!   suite-wide connection settings themselves live in fixture.zig (milestone 6).
 
 const std = @import("std");
 
@@ -29,6 +31,7 @@ const graphql_schema_test = @import("graphql_schema_test.zig");
 const graphql_route_test = @import("graphql_route_test.zig");
 const pool_test = @import("pool_test.zig");
 const connection_test = @import("connection_test.zig");
+const tls_test = @import("tls_test.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -40,4 +43,5 @@ test {
     _ = graphql_route_test;
     _ = pool_test;
     _ = connection_test;
+    _ = tls_test;
 }

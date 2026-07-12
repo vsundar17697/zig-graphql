@@ -97,3 +97,78 @@ jobs:
 
       - name: Integration tests
         run: zig build test-integration
+
+  # Milestone 6 TLS exit tests, per docs/roadmap-v1.md: the whole integration
+  # suite against (a) a TLS-required Postgres negotiating TLS 1.3 and (b) the
+  # same server pinned to TLS 1.2 (the RDS/Azure scenario that motivated
+  # adopting libpq, ADR 0016). No service container and no external infra:
+  # the runner image's own PostgreSQL is configured with throwaway certs from
+  # test/tls/gen-certs.sh and an hostssl-only pg_hba, so a plaintext client
+  # is refused at the protocol level (asserted below), and tls_test.zig
+  # asserts the negotiated protocol version from pg_stat_ssl server-side.
+  tls-integration:
+    name: TLS integration (${{ matrix.expect }}${{ matrix.pin && ', pinned' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pin: "", expect: "TLSv1.3" }
+          - { pin: "TLSv1.2", expect: "TLSv1.2" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install libpq and psql
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev postgresql-client
+
+      - name: Generate fixture certs
+        run: ./test/tls/gen-certs.sh
+
+      - name: Configure the runner's Postgres for TLS and start it
+        run: |
+          PGVER=$(ls /etc/postgresql | sort -n | tail -1)
+          PGCONF="/etc/postgresql/$PGVER/main"
+          echo "using PostgreSQL $PGVER at $PGCONF"
+
+          sudo install -o postgres -g postgres -m 0644 test/tls/generated/server.crt /var/lib/postgresql/server.crt
+          sudo install -o postgres -g postgres -m 0600 test/tls/generated/server.key /var/lib/postgresql/server.key
+          sudo cp test/tls/pg_hba.tls.conf "$PGCONF/pg_hba.conf"
+
+          {
+            echo "ssl = on"
+            echo "ssl_cert_file = '/var/lib/postgresql/server.crt'"
+            echo "ssl_key_file = '/var/lib/postgresql/server.key'"
+            if [ -n "${{ matrix.pin }}" ]; then
+              echo "ssl_max_protocol_version = '${{ matrix.pin }}'"
+            fi
+          } | sudo tee -a "$PGCONF/postgresql.conf"
+
+          sudo systemctl restart postgresql
+          timeout 30 bash -c 'until pg_isready -q; do sleep 1; done'
+
+      - name: Create role and seed fixture schema over TLS
+        run: |
+          sudo -u postgres psql -c "CREATE ROLE pggql LOGIN SUPERUSER"
+          sudo -u postgres createdb -O pggql pggql
+          psql "postgres://pggql@localhost:5432/pggql?sslmode=verify-full&sslrootcert=$PWD/test/tls/generated/ca.crt" \
+            -f test/fixtures/seed.sql
+
+      - name: Assert plaintext connections are refused
+        run: |
+          if psql "postgres://pggql@localhost:5432/pggql?sslmode=disable" -c "SELECT 1"; then
+            echo "server accepted a plaintext connection -- hostssl-only HBA is not in effect"
+            exit 1
+          fi
+
+      - name: Integration tests over TLS
+        env:
+          PGGQL_TEST_HOST: localhost
+          PGGQL_TEST_PORT: "5432"
+          PGGQL_TEST_SSLMODE: verify-full
+          PGGQL_TEST_SSLROOTCERT: ${{ github.workspace }}/test/tls/generated/ca.crt
+          PGGQL_TEST_EXPECT_TLS_VERSION: ${{ matrix.expect }}
+        run: zig build test-integration

@@ -4,18 +4,13 @@
 
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
-const fixture = pg_gql.pg_wire.Connection.Options{
-    .host = "127.0.0.1",
-    .port = 55432,
-    .user = "pggql",
-    .database = "pggql",
-};
 
 test "statement_timeout turns a runaway query into a reusable ServerError" {
     const allocator = std.testing.allocator;
 
-    var options = fixture;
+    var options = fixture.options();
     options.statement_timeout_ms = 50;
     const conn = try pg_gql.pg_wire.Connection.connect(allocator, options);
     defer conn.close();
@@ -34,7 +29,7 @@ test "statement_timeout turns a runaway query into a reusable ServerError" {
 test "cancel from another thread aborts a blocked query as ServerError" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture);
+    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
     defer conn.close();
 
     const canceller = try std.Thread.spawn(.{}, struct {
@@ -63,7 +58,7 @@ test "cancel from another thread aborts a blocked query as ServerError" {
 test "an unnamed prepared statement executes repeatedly with different params" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture);
+    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
     defer conn.close();
 
     const prepared = try conn.prepare("SELECT $1::int + 1 AS v");
@@ -80,7 +75,7 @@ test "an unnamed prepared statement executes repeatedly with different params" {
 test "preparing invalid SQL is a ServerError and the connection survives" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture);
+    const conn = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
     defer conn.close();
 
     try std.testing.expectError(

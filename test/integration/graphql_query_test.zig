@@ -1,17 +1,13 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
 test "GraphQL query with where/order_by/relationship returns the correct nested RowSet JSON" {
     const allocator = std.testing.allocator;
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
     defer schema_arena.deinit();
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
     const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
 
@@ -56,12 +52,7 @@ test "array relationship (artist -> album, reverse FK) returns all matching chil
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
     defer schema_arena.deinit();
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
     const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
 
@@ -96,12 +87,7 @@ test "exists(related: ...) filters artists to those with a matching album" {
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
     defer schema_arena.deinit();
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
     const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
 
@@ -130,12 +116,7 @@ test "album_aggregate returns count and max(album_id) over the filtered row set"
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
     defer schema_arena.deinit();
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
     const schema_model = try pg_gql.executor.introspectLive(schema_arena.allocator(), conn);
 

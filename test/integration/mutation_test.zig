@@ -1,14 +1,6 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
-
-fn connect(allocator: std.mem.Allocator) !*pg_gql.pg_wire.Connection {
-    return pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
-}
+const fixture = @import("fixture.zig");
 
 fn insertOperation(allocator: std.mem.Allocator, title: []const u8, artist_id: i64) !pg_gql.ndc_ir.MutationOperation {
     var object: std.json.ObjectMap = .empty;
@@ -27,7 +19,7 @@ fn insertOperation(allocator: std.mem.Allocator, title: []const u8, artist_id: i
 
 test "runMutation: insert_album returns affected_rows and the new row via returning" {
     const allocator = std.testing.allocator;
-    const conn = try connect(allocator);
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -70,7 +62,7 @@ test "runMutation: insert_album returns affected_rows and the new row via return
 
 test "runMutation: update_album_by_pk changes the row, delete_album_by_pk removes it" {
     const allocator = std.testing.allocator;
-    const conn = try connect(allocator);
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);
@@ -136,7 +128,7 @@ test "runMutation: update_album_by_pk changes the row, delete_album_by_pk remove
 // desynchronize and start returning wrong results).
 test "runMutation: a transaction with a later FK violation rolls back the earlier operation, and the connection stays usable" {
     const allocator = std.testing.allocator;
-    const conn = try connect(allocator);
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var schema_arena = std.heap.ArenaAllocator.init(allocator);

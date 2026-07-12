@@ -1,12 +1,7 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
-const pool_options = pg_gql.pg_wire.Connection.Options{
-    .host = "127.0.0.1",
-    .port = 55432,
-    .user = "pggql",
-    .database = "pggql",
-};
 
 // M4.7 checkpoint: N threads x M requests against a small pool, asserting
 // both correctness (every query gets the right answer) and that the pool
@@ -17,7 +12,7 @@ test "pool: concurrent acquire/release from many threads never exceeds max open 
     const thread_count = 8;
     const requests_per_thread = 5;
 
-    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, max_connections);
+    var pool = pg_gql.pg_wire.Pool.init(allocator, fixture.options(), max_connections);
     defer pool.deinit();
 
     const Worker = struct {
@@ -61,7 +56,7 @@ test "pool: concurrent acquire/release from many threads never exceeds max open 
 // connection.
 test "pool: a connection killed mid-lease is discarded, not returned to the idle pool" {
     const allocator = std.testing.allocator;
-    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, 2);
+    var pool = pg_gql.pg_wire.Pool.init(allocator, fixture.options(), 2);
     defer pool.deinit();
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
@@ -75,7 +70,7 @@ test "pool: a connection killed mid-lease is discarded, not returned to the idle
     };
 
     // Kill it from a second, independent connection.
-    const killer = try pg_gql.pg_wire.Connection.connect(allocator, pool_options);
+    const killer = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
     defer killer.close();
     {
         const sql = try std.fmt.allocPrint(allocator, "SELECT pg_terminate_backend({d})", .{backend_pid});
@@ -102,12 +97,72 @@ test "pool: a connection killed mid-lease is discarded, not returned to the idle
     try std.testing.expectEqualStrings("1", result.rows[0].columns[0].?);
 }
 
+// Milestone 6 exit criterion, the "kill the database mid-query" test: the
+// backend dies while a query is actually in flight (not between queries,
+// which the mid-lease test above covers). The blocked query must come back
+// as an error -- promptly, not by hanging until some timeout -- and the pool
+// must hand out a working connection afterwards.
+test "pool: a backend killed mid-query fails the in-flight query and the pool recovers" {
+    const allocator = std.testing.allocator;
+    var pool = pg_gql.pg_wire.Pool.init(allocator, fixture.options(), 2);
+    defer pool.deinit();
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    const io = threaded.io();
+
+    var lease = try pool.acquire(io);
+    const backend_pid: i64 = blk: {
+        var result = try lease.conn.query("SELECT pg_backend_pid()", &.{});
+        defer result.deinit();
+        break :blk try std.fmt.parseInt(i64, result.rows[0].columns[0].?, 10);
+    };
+
+    // The victim query blocks server-side; run it on its own thread so this
+    // thread can pull the rug out from under it.
+    const Victim = struct {
+        fn run(conn: *pg_gql.pg_wire.Connection, failed: *bool) void {
+            const result = conn.query("SELECT pg_sleep(30)", &.{});
+            failed.* = std.meta.isError(result);
+            if (result) |*r| @constCast(r).deinit() else |_| {}
+        }
+    };
+    var query_failed = false;
+    const victim = try std.Thread.spawn(.{}, Victim.run, .{ lease.conn, &query_failed });
+
+    // Let the query reach the server before terminating its backend.
+    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(300), .awake);
+    const killer = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
+    defer killer.close();
+    {
+        const sql = try std.fmt.allocPrint(allocator, "SELECT pg_terminate_backend({d})", .{backend_pid});
+        defer allocator.free(sql);
+        var result = try killer.query(sql, &.{});
+        defer result.deinit();
+    }
+
+    // join() doubles as the no-hang assertion: if the client never notices
+    // the dead backend, the 30s pg_sleep (not any client logic) is what
+    // eventually unblocks this, and the test times out loudly.
+    victim.join();
+    try std.testing.expect(query_failed);
+
+    lease.markBrokenUnless(error.Unexpected);
+    lease.release(io);
+
+    // The pool must recover: fresh acquire, working connection.
+    var new_lease = try pool.acquire(io);
+    defer new_lease.release(io);
+    var result = try new_lease.conn.query("SELECT 1", &.{});
+    defer result.deinit();
+    try std.testing.expectEqualStrings("1", result.rows[0].columns[0].?);
+}
+
 // Milestone 6 staleness policy: a connection past max_lifetime_ms is
 // recycled on acquire even though it is perfectly healthy -- proven by the
 // backend PID changing across a release/acquire pair.
 test "pool: max-lifetime recycling dials a fresh connection on acquire" {
     const allocator = std.testing.allocator;
-    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, 1);
+    var pool = pg_gql.pg_wire.Pool.init(allocator, fixture.options(), 1);
     defer pool.deinit();
     pool.max_lifetime_ms = -1; // every connection is instantly "too old"
 
@@ -133,7 +188,7 @@ test "pool: max-lifetime recycling dials a fresh connection on acquire" {
 // death happens while the pool holds the connection.)
 test "pool: a dead idle connection is caught by validation and replaced on acquire" {
     const allocator = std.testing.allocator;
-    var pool = pg_gql.pg_wire.Pool.init(allocator, pool_options, 1);
+    var pool = pg_gql.pg_wire.Pool.init(allocator, fixture.options(), 1);
     defer pool.deinit();
     pool.validate_after_idle_ms = -1; // ping on every acquire
 
@@ -145,7 +200,7 @@ test "pool: a dead idle connection is caught by validation and replaced on acqui
     lease_1.release(io);
 
     // Kill the idle connection's backend from an independent connection.
-    const killer = try pg_gql.pg_wire.Connection.connect(allocator, pool_options);
+    const killer = try pg_gql.pg_wire.Connection.connect(allocator, fixture.options());
     defer killer.close();
     {
         const sql = try std.fmt.allocPrint(allocator, "SELECT pg_terminate_backend({d})", .{pid_1});

@@ -1,5 +1,6 @@
 const std = @import("std");
 const pg_gql = @import("pg_gql");
+const fixture = @import("fixture.zig");
 
 // M4.4 checkpoint: a golden SDL snapshot against the real fixture schema.
 // Asserted as a set of exact substrings rather than one full byte-exact
@@ -9,12 +10,7 @@ const pg_gql = @import("pg_gql");
 test "SDL rendered from the live fixture schema has the expected shapes" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -72,12 +68,7 @@ test "SDL rendered from the live fixture schema has the expected shapes" {
 test "the canonical GraphiQL/Apollo introspection query executes against the live fixture schema" {
     const allocator = std.testing.allocator;
 
-    const conn = try pg_gql.pg_wire.Connection.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = 55432,
-        .user = "pggql",
-        .database = "pggql",
-    });
+    const conn = try fixture.connect(allocator);
     defer conn.close();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
