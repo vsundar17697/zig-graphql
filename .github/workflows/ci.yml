@@ -37,6 +37,26 @@ jobs:
       - name: Unit tests
         run: zig build test
 
+  smoke-fuzz:
+    name: smoke fuzz (bounded coverage-guided run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install libpq
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      # A bounded run of the coverage-guided fuzz targets (GraphQL parser,
+      # NDC request decoders). 200K iterations keeps this to roughly a
+      # minute of fuzzing; the sustained long runs stay local per
+      # roadmap-v1.md milestone 5.
+      - name: Smoke fuzz
+        run: zig build test --fuzz=200K
+
   integration:
     name: Postgres integration tests
     runs-on: ubuntu-latest
