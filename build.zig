@@ -162,8 +162,25 @@ pub fn build(b: *std.Build) void {
         .mode = .server,
     };
 
+    // Pass -Dfuzz alongside `--fuzz`: the self-hosted x86_64 backend (the
+    // Debug-mode default on x86_64) miscompiles fuzz coverage instrumentation
+    // (ziglang/zig#30655 on codeberg; upstream is moving fuzz builds to LLVM
+    // by default), which surfaces as "corrupted coverage file: pcs_len was
+    // zero" after the run. build.zig cannot see whether --fuzz was passed, so
+    // this has to be an explicit option. Drop once upstream forces LLVM for
+    // fuzz builds.
+    const fuzz_llvm = b.option(
+        bool,
+        "fuzz",
+        "Build test binaries with the LLVM backend (required for --fuzz on x86_64)",
+    ) orelse false;
+
     for (unit_test_modules) |mod| {
-        const t = b.addTest(.{ .root_module = mod, .test_runner = test_runner });
+        const t = b.addTest(.{
+            .root_module = mod,
+            .test_runner = test_runner,
+            .use_llvm = if (fuzz_llvm) true else null,
+        });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 

@@ -53,9 +53,12 @@ jobs:
       # A bounded run of the coverage-guided fuzz targets (GraphQL parser,
       # NDC request decoders). 200K iterations keeps this to roughly a
       # minute of fuzzing; the sustained long runs stay local per
-      # roadmap-v1.md milestone 5.
+      # roadmap-v1.md milestone 5. -Dfuzz forces the LLVM backend: the
+      # self-hosted x86_64 backend miscompiles fuzz coverage instrumentation
+      # ("corrupted coverage file: pcs_len was zero" -- codeberg
+      # ziglang/zig#30655; see build.zig).
       - name: Smoke fuzz
-        run: zig build test --fuzz=200K
+        run: zig build test --fuzz=200K -Dfuzz
 
   integration:
     name: Postgres integration tests
