@@ -154,8 +154,16 @@ pub fn build(b: *std.Build) void {
     const unit_test_modules = [_]*std.Build.Module{
         ndc_ir, schema, sql_gen, pg_wire, graphql_parser, query_builder, executor, graphql_schema, pg_gql, c_abi_mod, http_server_mod,
     };
+    // Vendored test runner: identical to the compiler's default except for a
+    // one-line fix that unbreaks `zig build test --fuzz` on Zig 0.16.0 (see
+    // build_support/test_runner.zig for the details and removal condition).
+    const test_runner: std.Build.Step.Compile.TestRunner = .{
+        .path = b.path("build_support/test_runner.zig"),
+        .mode = .server,
+    };
+
     for (unit_test_modules) |mod| {
-        const t = b.addTest(.{ .root_module = mod });
+        const t = b.addTest(.{ .root_module = mod, .test_runner = test_runner });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 

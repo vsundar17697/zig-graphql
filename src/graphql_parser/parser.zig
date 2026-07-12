@@ -481,3 +481,26 @@ test "rejects an inline fragment" {
         parse(arena.allocator(), "{ album { ... on Album { title } } }"),
     );
 }
+
+// Coverage-guided fuzz target (roadmap-v1.md milestone 5): the parser sits on
+// the untrusted-input boundary (`POST /graphql` hands it raw client bytes),
+// so arbitrary input must produce a Document or an Error -- never a crash,
+// hang, or leak. Runs once as a plain test; runs coverage-guided under
+// `zig build test --fuzz`.
+test "fuzz: parse never crashes on arbitrary input" {
+    try std.testing.fuzz({}, fuzzParse, .{ .corpus = &.{
+        "{ album(limit: 5) { title artist { name } } }",
+        "query Q($n: Int) { album(where: {album_id: {_in: [1, 2]}}) @skip(if: false) { ...f } } fragment f on album { title }",
+        "mutation { insert_album(object: {title: \"x\", artist_id: 1}) { affected_rows returning { title } } }",
+        "{ album_aggregate { count max(column: \"album_id\") } }",
+    } });
+}
+
+fn fuzzParse(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    const len = smith.slice(&buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = parse(arena.allocator(), buf[0..len]) catch return;
+}

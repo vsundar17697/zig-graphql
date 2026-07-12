@@ -615,3 +615,41 @@ test "parseMutationRequest rejects a relationship field inside returning" {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request_text, .{});
     try std.testing.expectError(Error.UnsupportedFeature, parseMutationRequest(allocator, parsed.value));
 }
+
+// Coverage-guided fuzz target (roadmap-v1.md milestone 5): these decoders sit
+// on the untrusted-input boundary (`POST /query` / `POST /mutation` hand them
+// client-controlled JSON), so arbitrary bytes must produce an IR value or an
+// Error -- never a crash, hang, or leak. std.json filters syntax; what this
+// exercises is the Value-walking layer (type confusion, missing fields,
+// absurd nesting) against a small fixture schema. Runs once as a plain test;
+// runs coverage-guided under `zig build test --fuzz`.
+test "fuzz: request decoders never crash on arbitrary JSON" {
+    try std.testing.fuzz({}, fuzzDecoders, .{ .corpus = &.{
+        \\{"collection":"album","query":{"fields":{"title":{"type":"column","column":"title"}},"limit":5,"predicate":{"type":"binary_comparison_operator","column":{"name":"album_id"},"operator":"_in","value":{"type":"variable","name":"ids"}}},"arguments":{},"collection_relationships":{},"variables":[{"ids":[1,2]}]}
+        ,
+        \\{"operations":[{"type":"procedure","name":"insert_album","arguments":{"object":{"title":"x","artist_id":1}},"fields":{"affected_rows":{"type":"column","column":"affected_rows"}}}],"collection_relationships":{}}
+        ,
+    } });
+}
+
+fn fuzzDecoders(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    const len = smith.slice(&buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, buf[0..len], .{}) catch return;
+
+    var schema_model = schema.SchemaModel{};
+    schema_model.collections.put(a, "album", .{
+        .db_schema = "public",
+        .db_table = "album",
+        .object_type = "album",
+    }) catch return;
+
+    _ = parseQueryRequest(a, parsed, &schema_model) catch {};
+    _ = parseVariableSets(a, parsed) catch {};
+    _ = parseMutationRequest(a, parsed) catch {};
+}
