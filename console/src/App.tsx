@@ -1,6 +1,7 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { AppShell } from "@/components/layout/AppShell"
 import { ConnectionProvider } from "@/features/connection/connection-context"
+import { QueryRunnerPage } from "@/features/query-runner/QueryRunnerPage"
 
 function PagePlaceholder({ title }: { title: string }) {
   return (
@@ -23,7 +24,7 @@ export default function App() {
           }
         >
           <TabsContent value="graphiql" className="h-full">
-            <PagePlaceholder title="Query runner" />
+            <QueryRunnerPage />
           </TabsContent>
           <TabsContent value="data" className="h-full">
             <PagePlaceholder title="Data browser" />
